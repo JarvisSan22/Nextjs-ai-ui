@@ -4,29 +4,36 @@
  * Documentation: https://v0.dev/docs#integrating-generated-code-into-your-nextjs-app
  */
 "use client";
-import React, { useState, Dispatch, SetStateAction } from 'react';
+import React, { useState, useEffect,Dispatch, SetStateAction } from 'react';
+import JSZip from 'jszip';
+import { saveAs } from 'file-saver';
+import Papa from 'papaparse';
+import B2 from 'backblaze-b2';
 
 type Image = {
   src: string;
+  base64: string;
   caption: string;
 };
 
-type ImageUploadProps = {
-  images: Image[];
-  setImages: Dispatch<SetStateAction<Image[]>>;
-  setCaptionsGenerated: Dispatch<SetStateAction<boolean>>;
-};
+interface ImageUploadProps {
+  images: Array<{ src: string; base64: string; caption: string }>;
+  setImages: React.Dispatch<React.SetStateAction<Array<{ src: string; base64: string; caption: string }>>>;
+  setCaptionsGenerated: React.Dispatch<React.SetStateAction<boolean>>;
+}
+const generateCaptions = async (images: Array<{ src: string; base64: string; caption: string }>, setImages: React.Dispatch<React.SetStateAction<Array<{ src: string; base64: string; caption: string }>>>) => {
+  // Update all images with 'Caption generation in progress...' before making the API calls
+  setImages(images.map(image => ({ ...image, caption: 'Caption generation in progress...' })));
 
-const generateCaptions = async (images: Image[]) => {
   const updatedImages = await Promise.all(
     images.map(async (image) => {
       const input = {
-        image: image.src,
-        prompt: "Generate a caption for this image."
+        image: image.base64, // Send the base64 string to the API
+        prompt: "Generate detailed caption for this image as if you where to prompt this image, give face feactures, background , and clothes details. "
       };
 
       try {
-        const response = await fetch('/api/generate-caption', {
+        const response = await fetch('/api/caption', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -38,8 +45,14 @@ const generateCaptions = async (images: Image[]) => {
           throw new Error('Failed to generate caption');
         }
         const data = await response.json();
-        console.log(data);
-        return { ...image, caption:data.caption.join(' ').trim()  };
+        console.log("-----------------");
+        console.log(data.output ? data.output.join(' ') : 'No output');
+
+        if (data.output) {
+          return { ...image, caption: data.output.join(' ').trim() };
+        } else {
+          return { ...image, caption: 'Failed to generate caption' };
+        }
       } catch (error) {
         console.error('Error:', error);
         return { ...image, caption: 'Failed to generate caption' };
@@ -49,13 +62,27 @@ const generateCaptions = async (images: Image[]) => {
   return updatedImages;
 };
 
+
 function ImageUpload({ images, setImages, setCaptionsGenerated }: ImageUploadProps) {
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+
+  const convertToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = error => reject(error);
+    });
+  };
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (files) {
-      const uploadedImages = Array.from(files).map((file) => ({
-        src: URL.createObjectURL(file),
-        caption: `Auto-generated caption for ${file.name}`,
+      const uploadedImages = await Promise.all(Array.from(files).map(async (file) => {
+        const base64 = await convertToBase64(file);
+        return {
+          src: URL.createObjectURL(file),
+          base64: base64,
+          caption: `Auto-generated caption for ${file.name}`,
+        };
       }));
       setImages(uploadedImages);
       setCaptionsGenerated(false); // Reset captions generated state
@@ -63,7 +90,7 @@ function ImageUpload({ images, setImages, setCaptionsGenerated }: ImageUploadPro
   };
 
   const handleGenerateCaptions = async () => {
-    const updatedImages = await generateCaptions(images);
+    const updatedImages = await generateCaptions(images,setImages);
     setImages(updatedImages);
     setCaptionsGenerated(true);
   };
@@ -90,6 +117,21 @@ function ImageUpload({ images, setImages, setCaptionsGenerated }: ImageUploadPro
 }
 
 function ImageCaptioningEdit({ images }: { images: Image[] }) {
+  const [captions, setCaptions] = useState<string[]>([]);
+
+  useEffect(() => {
+    setCaptions(images.map(image => image.caption));
+  }, [images]);
+
+  const handleCaptionChange = (index: number, newCaption: string) => {
+    const updatedCaptions = [...captions];
+    updatedCaptions[index] = newCaption;
+    setCaptions(updatedCaptions);
+
+    // You can add a function here to update the parent state if needed
+    // For example: updateImageCaption(index, newCaption);
+  };
+
   return (
     <div className="w-full space-y-6">
       {images.map((image, index) => (
@@ -97,7 +139,8 @@ function ImageCaptioningEdit({ images }: { images: Image[] }) {
           <img src={image.src} alt="Uploaded" className="w-36 h-36 mr-6 rounded-full" />
           <textarea
             className="w-full p-4 bg-[#80c8f8] border-4 border-[#4b1b4b] rounded-md text-[#4b1b4b]"
-            defaultValue={image.caption}
+            value={captions[index] || ''}
+            onChange={(e) => handleCaptionChange(index, e.target.value)}
           />
         </div>
       ))}
@@ -105,27 +148,124 @@ function ImageCaptioningEdit({ images }: { images: Image[] }) {
   );
 }
 
-function FinalTrainButton({ captionsGenerated }: { captionsGenerated: boolean }) {
+interface FinalTrainButtonProps {
+  images: Array<Image>;
+  captionsGenerated: boolean;
+  sokStyleCode: string; // Add sokStyleCode as a prop
+}
+
+
+const FinalTrainButton = ({ images, captionsGenerated,sokStyleCode}: FinalTrainButtonProps) => {
+  const handleStartTraining = async () => {
+    // Create CSV file
+    const csvData = images.map((image, index) => ({
+      image: `image${index + 1}.png`,
+      caption: `${image.caption} , ${sokStyleCode} `,
+    }));
+
+    const csv = Papa.unparse(csvData);
+
+    // Create a zip file and add the CSV to it
+    const zip = new JSZip();
+    zip.file('captions.csv', csv);
+
+    // Create ZIP file from base64 images and CSV
+    images.forEach((image, index) => {
+      const base64Data = image.base64.split(',')[1]; // Remove the data URL prefix
+      zip.file(`image${index + 1}.png`, base64Data, { base64: true });
+    });
+
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    //saveAs(zipBlob, 'training_data.zip');
+    // Convert Blob to ArrayBuffer for Backblaze B2 upload
+    const arrayBuffer = await zipBlob.arrayBuffer();
+     // Initialize Backblaze B2
+     const b2 = new B2({
+      applicationKeyId: process.env.NEXT_PUBLIC_B2_APPLICATION_KEY_ID,
+      applicationKey: process.env.NEXT_PUBLIC_B2_APPLICATION_KEY,
+    });
+
+    try {
+
+        // Authorize with B2
+      await b2.authorize();
+
+      // Get upload URL
+      const uploadUrlResponse = await b2.getUploadUrl({
+        bucketId: process.env.NEXT_PUBLIC_B2_BUCKET_ID,
+      });
+
+      const uploadUrl = uploadUrlResponse.data.uploadUrl;
+      const uploadAuthToken = uploadUrlResponse.data.authorizationToken;
+
+      // Upload file to B2
+      const fileName = `training-data-${Date.now()}.zip`;
+      const uploadResponse = await b2.uploadFile({
+        uploadUrl,
+        uploadAuthToken,
+        fileName,
+        data: arrayBuffer,
+      });
+
+      const zipFileUrl = `https://f000.backblazeb2.com/file/${process.env.NEXT_PUBLIC_B2_BUCKET_NAME}/${fileName}`;
+      console.log('File uploaded successfully at:', zipFileUrl);
+
+       // Send the ZIP file to the training endpoint
+      const payload = {
+        zipFile: zipFileUrl,
+        tokenString: sokStyleCode,
+        captionPrefix: `a photo of ${sokStyleCode}`,
+        maxTrainSteps: 1000,
+      };
+
+      console.log(payload);
+      const response = await fetch('/api/train', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({payload}),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to start training');
+      }
+
+      const data = await response.json();
+      console.log('Training started successfully:', data);
+    } catch (error) {
+      console.error('Error:', error);
+    }
+  };
+
   return (
     <button
       className="w-full px-6 py-3 text-[#f7a8f7] bg-[#4b1b4b] rounded-2xl font-bold"
       disabled={!captionsGenerated}
+      onClick={handleStartTraining}
     >
       Start Training
     </button>
   );
-}
+};
 
 export function Component() {
   const [images, setImages] = useState<Image[]>([]);
   const [captionsGenerated, setCaptionsGenerated] = useState(false);
+  const [sokStyleCode, setSokStyleCode] = useState('SOK'); // State for SOK style code
 
   return (
     <div className="flex flex-col items-center w-full max-w-4xl p-6 mx-auto space-y-8 bg-[#80c8f8] border-4 border-[#f7a8f7] rounded-3xl shadow-2xl">
       <h1 className="text-4xl font-bold text-[#4b1b4b]">Image Caption Interface</h1>
       <ImageUpload images={images} setImages={setImages} setCaptionsGenerated={setCaptionsGenerated} />
       <ImageCaptioningEdit images={images} />
-      <FinalTrainButton captionsGenerated={captionsGenerated} />
+      <textarea
+        className="w-full p-4 bg-[#f7a8f7] border-4 border-[#4b1b4b] rounded-md text-[#4b1b4b]"
+        placeholder="Enter SOK style code"
+        value={sokStyleCode}
+        onChange={(e) => setSokStyleCode(e.target.value)}
+      />
+      <FinalTrainButton images={images}  captionsGenerated={captionsGenerated} sokStyleCode={sokStyleCode}/>
     </div>
   );
 }
