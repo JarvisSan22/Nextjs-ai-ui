@@ -5,10 +5,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ? `https://${process.env.VERCEL_URL}`
 // : process.env.NGROK_HOST;
 
-const WEBHOOK_HOST = 'http://localhost:3000';
+//const WEBHOOK_HOST = 'http://localhost:3000';
+const WEBHOOK_HOST = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : process.env.NEXT_PUBLIC_BASE_URL;
 
 const replicate = new Replicate({
-  auth: process.env.REPLICATE_API_TOKEN, //"r8_7B7yU9skr41mQErcHQHY93hKnIowssl0xehTh", //
+  auth: process.env.REPLICATE_API_TOKEN, 
 });
 //console.log(replicate)
 

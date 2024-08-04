@@ -2,7 +2,8 @@ import Replicate from "replicate";
 import { NextResponse } from "next/server";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const WEBHOOK_HOST = 'http://localhost:3000';
+//const WEBHOOK_HOST = 'http://localhost:3000';
+const WEBHOOK_HOST = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : process.env.NEXT_PUBLIC_BASE_URL;
 
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
